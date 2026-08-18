@@ -210,8 +210,8 @@ class _CartScreenState extends State<CartScreen> {
                 return Card(
                   margin: const EdgeInsets.only(left: 16, right: 16, top: 8),
                   child: ListTile(
-                    leading: Text(item.imagePath,
-                        style: const TextStyle(fontSize: 24)),
+                    // leading: Text(item.imagePath,
+                    //     style: const TextStyle(fontSize: 24)),
                     title: Text(item.name,
                         style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Column(
