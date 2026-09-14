@@ -76,6 +76,11 @@ class PrinterService {
         bytes += generator.text(strRowPrint);
       }
 
+      // PERBAIKAN: print catatan item kalau ada (contoh: tidak pedas, tanpa gula)
+      if (item.note.isNotEmpty) {
+        bytes += generator.text("   *${item.note}");
+      }
+
       // bytes += generator.row([
       //   PosColumn(
       //     text:
@@ -147,6 +152,132 @@ class PrinterService {
 
     bytes += generator.feed(2);
 
+    bytes.addAll([29, 86, 66, 0]);
+
+    await PrintBluetoothThermal.writeBytes(bytes);
+  }
+
+  // =========================================================================
+  // FUNGSI BARU: CETAK STRUK UNTUK PESANAN SELF-ORDER YANG DI-APPROVE
+  // =========================================================================
+  // PERBAIKAN: sebelumnya layar Verifikasi Self-Order tidak mencetak struk
+  // sama sekali karena printReceipt() di atas bergantung pada
+  // PosProvider.cart (state keranjang milik layar kasir biasa). Fungsi
+  // baru ini SENGAJA tidak menyentuh PosProvider sama sekali -- item
+  // diambil langsung dari data pesanan self-order yang di-approve --
+  // supaya tidak mengganggu/menimpa keranjang kasir yang mungkin sedang
+  // dipakai bersamaan di layar lain.
+  Future<void> printSelfOrderReceipt({
+    required List<dynamic> items, // items dari self_order (nama_produk, quantity, harga_satuan, dst)
+    required double totalTax,
+    required double finalTotal,
+    required double cashAmount,
+    required double change,
+    required String paymentMethod,
+    required String nomorFaktur,
+    String? namaPelanggan,
+    String? noMeja,
+  }) async {
+    bool isConnected = await PrintBluetoothThermal.connectionStatus;
+    if (!isConnected) return;
+
+    String sline = "------------------------------------------------";
+    String strRow = "";
+    String strRowPrint = "";
+    int irow = 0;
+    int ipaper = 48;
+    int isisa = 0;
+    final formatRupiah =
+        NumberFormat.currency(locale: 'id_ID', symbol: 'Rp ', decimalDigits: 0);
+    final CapabilityProfile profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm58, profile);
+    List<int> bytes = [];
+
+    bytes += generator.text(SettingSession.nama_cabang,
+        styles: const PosStyles(align: PosAlign.center, bold: true));
+    bytes += generator.text(SettingSession.alamat_cabang,
+        styles: const PosStyles(align: PosAlign.center));
+    bytes +=
+        generator.text(sline, styles: const PosStyles(align: PosAlign.center));
+
+    bytes += generator.text("No Bill : $nomorFaktur");
+    if (noMeja != null && noMeja.isNotEmpty) {
+      bytes += generator.text("Meja    : $noMeja");
+    }
+    if (namaPelanggan != null && namaPelanggan.isNotEmpty) {
+      bytes += generator.text("Nama    : $namaPelanggan");
+    }
+    bytes += generator
+        .text("Tanggal : ${DateTime.now().toString().substring(0, 16)}");
+    bytes += generator.text("Kasir   : ${SettingSession.nama_lengkap}");
+    bytes +=
+        generator.text(sline, styles: const PosStyles(align: PosAlign.center));
+
+    // List item dari pesanan self-order (bukan dari PosProvider.cart)
+    for (var item in items) {
+      final namaProduk = item['nama_produk'] ?? 'Produk';
+      final qty = int.tryParse(item['quantity'].toString()) ?? 0;
+      final subtotal = double.tryParse(item['subtotal'].toString()) ?? 0;
+
+      strRow = "${qty}x $namaProduk ${formatRupiah.format(subtotal)}";
+      irow = strRow.length;
+      isisa = ipaper - irow;
+      String spasi = ' ' * (isisa < 1 ? 1 : isisa);
+      strRowPrint = "${qty}x $namaProduk$spasi ${formatRupiah.format(subtotal)}";
+      bytes += generator.text(strRowPrint);
+    }
+
+    bytes +=
+        generator.text(sline, styles: const PosStyles(align: PosAlign.center));
+    if (totalTax > 0) {
+      bytes += generator.row([
+        PosColumn(text: "PAJAK:", width: 6, styles: const PosStyles(bold: true)),
+        PosColumn(
+          text: formatRupiah.format(totalTax),
+          width: 6,
+          styles: const PosStyles(align: PosAlign.right, bold: true),
+        ),
+      ]);
+    }
+    bytes += generator.row([
+      PosColumn(text: "TOTAL:", width: 6, styles: const PosStyles(bold: true)),
+      PosColumn(
+        text: formatRupiah.format(finalTotal),
+        width: 6,
+        styles: const PosStyles(align: PosAlign.right, bold: true),
+      ),
+    ]);
+    bytes += generator.row([
+      PosColumn(text: "BAYAR:", width: 6),
+      PosColumn(
+        text: formatRupiah.format(cashAmount),
+        width: 6,
+        styles: const PosStyles(align: PosAlign.right),
+      ),
+    ]);
+    bytes += generator.row([
+      PosColumn(text: "KEMBALI:", width: 6),
+      PosColumn(
+        text: formatRupiah.format(change),
+        width: 6,
+        styles: const PosStyles(align: PosAlign.right),
+      ),
+    ]);
+    bytes += generator.row([
+      PosColumn(text: "METODE:", width: 6),
+      PosColumn(
+        text: paymentMethod,
+        width: 6,
+        styles: const PosStyles(align: PosAlign.right),
+      ),
+    ]);
+
+    bytes +=
+        generator.text(sline, styles: const PosStyles(align: PosAlign.center));
+    bytes += generator.text("Terima Kasih Atas Kunjungan Anda",
+        styles: const PosStyles(align: PosAlign.center));
+
+    bytes += generator.feed(2);
     bytes.addAll([29, 86, 66, 0]);
 
     await PrintBluetoothThermal.writeBytes(bytes);

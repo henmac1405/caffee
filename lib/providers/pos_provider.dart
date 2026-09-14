@@ -44,7 +44,12 @@ class PosProvider with ChangeNotifier {
   }
 
   void addToCart(MenuItem item) {
-    int index = _cart.indexWhere((element) => element.id == item.id);
+    // PERBAIKAN: pencocokan sekarang berdasarkan id DAN note. Jadi
+    // produk yang sama dengan catatan yang BEDA (misal "Kopi tanpa gula"
+    // vs "Kopi extra pahit") jadi baris terpisah di keranjang, bukan
+    // ketumpuk jadi satu baris.
+    int index = _cart.indexWhere(
+        (element) => element.id == item.id && element.note == item.note);
     if (index >= 0) {
       _cart[index].quantity++;
     } else {
@@ -57,8 +62,18 @@ class PosProvider with ChangeNotifier {
         tax: item.tax,
         category: item.category,
         imagePath: item.imagePath,
+        note: item.note,
       ));
     }
+    notifyListeners();
+  }
+
+  /// PERBAIKAN: ubah catatan untuk satu baris item spesifik di keranjang
+  /// (berdasarkan posisi/index, karena bisa ada beberapa baris dengan
+  /// produk sama tapi catatan berbeda).
+  void setNoteAt(int index, String note) {
+    if (index < 0 || index >= _cart.length) return;
+    _cart[index].note = note;
     notifyListeners();
   }
 
@@ -78,6 +93,21 @@ class PosProvider with ChangeNotifier {
       // BANCIAN UTAMA: Wajib panggil notifyListeners agar jumlah & total harga di UI bertambah!
       notifyListeners();
     }
+  }
+
+  /// PERBAIKAN: sama seperti updateQuantity(), tapi berdasarkan POSISI
+  /// baris di keranjang (bukan cuma id produk). Ini penting sekarang
+  /// karena produk yang sama bisa punya beberapa baris terpisah kalau
+  /// catatannya beda -- updateQuantity(productId) lama akan selalu
+  /// kena baris PERTAMA yang cocok id-nya, padahal user mungkin
+  /// memaksudkan baris kedua/ketiga.
+  void updateQuantityAt(int index, int count) {
+    if (index < 0 || index >= _cart.length) return;
+    _cart[index].quantity += count;
+    if (_cart[index].quantity <= 0) {
+      _cart.removeAt(index);
+    }
+    notifyListeners();
   }
 
   void clearTransaction() {

@@ -9,7 +9,21 @@ import '../services/shift_provider.dart';
 import '../database/apihelper.dart';
 
 class CartScreen extends StatefulWidget {
-  const CartScreen({super.key});
+  // PERBAIKAN: parameter opsional ini diisi ketika keranjang datang dari
+  // layar Verifikasi Self-Order (bukan input manual kasir). Kalau
+  // fromSelfOrderId != null, setelah pembayaran sukses, self_order yang
+  // bersangkutan otomatis ditandai selesai di backend supaya hilang dari
+  // daftar pending -- lihat _showReceiptPreview di bawah.
+  final int? fromSelfOrderId;
+  final String? selfOrderNoMeja;
+  final String? selfOrderNamaPelanggan;
+
+  const CartScreen({
+    super.key,
+    this.fromSelfOrderId,
+    this.selfOrderNoMeja,
+    this.selfOrderNamaPelanggan,
+  });
 
   @override
   State<CartScreen> createState() => _CartScreenState();
@@ -81,6 +95,40 @@ class _CartScreenState extends State<CartScreen> {
         content: Text(
             'Izin Bluetooth & Lokasi wajib diaktifkan untuk mencari printer baru!'),
         backgroundColor: Colors.orangeAccent,
+      ),
+    );
+  }
+
+  // PERBAIKAN: dialog kecil untuk tambah/ubah catatan per item keranjang
+  // (contoh: "tidak pedas", "tanpa gula").
+  void _showEditNoteDialog(
+      BuildContext context, PosProvider posProvider, int index, String currentNote) {
+    final controller = TextEditingController(text: currentNote);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Catatan Item'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 100,
+          decoration: const InputDecoration(
+            hintText: 'Contoh: tidak pedas, tanpa gula',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Batal')),
+          ElevatedButton(
+            onPressed: () {
+              posProvider.setNoteAt(index, controller.text.trim());
+              Navigator.pop(ctx);
+            },
+            child: const Text('Simpan'),
+          ),
+        ],
       ),
     );
   }
@@ -232,6 +280,36 @@ class _CartScreenState extends State<CartScreen> {
                             style: const TextStyle(
                                 fontWeight: FontWeight.w600,
                                 color: Colors.black87)),
+                        // PERBAIKAN: tampilkan catatan item kalau ada,
+                        // plus tombol untuk tambah/edit catatan.
+                        if (item.note.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text('Catatan: ${item.note}',
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    fontStyle: FontStyle.italic,
+                                    color: Colors.deepOrange)),
+                          ),
+                        InkWell(
+                          onTap: () => _showEditNoteDialog(context, posProvider, idx, item.note),
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.edit_note,
+                                    size: 16, color: Colors.blueGrey.shade400),
+                                const SizedBox(width: 2),
+                                Text(
+                                  item.note.isEmpty ? 'Tambah catatan' : 'Ubah catatan',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Colors.blueGrey.shade400),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                     trailing: Row(
@@ -241,7 +319,7 @@ class _CartScreenState extends State<CartScreen> {
                           icon: const Icon(Icons.remove_circle_outline,
                               color: Colors.red),
                           onPressed: () {
-                            posProvider.updateQuantity(item.id.toString(), -1);
+                            posProvider.updateQuantityAt(idx, -1);
                             _calculateChange(posProvider.finalTotalWithTax);
                           },
                         ),
@@ -252,7 +330,7 @@ class _CartScreenState extends State<CartScreen> {
                           icon: const Icon(Icons.add_circle_outline,
                               color: Colors.green),
                           onPressed: () {
-                            posProvider.updateQuantity(item.id.toString(), 1);
+                            posProvider.updateQuantityAt(idx, 1);
                             _calculateChange(posProvider.finalTotalWithTax);
                           },
                         ),
@@ -472,6 +550,16 @@ class _CartScreenState extends State<CartScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // PERBAIKAN: tampilkan info meja/pelanggan kalau keranjang
+              // ini berasal dari self-order yang baru di-Terima.
+              if (widget.fromSelfOrderId != null) ...[
+                if ((widget.selfOrderNoMeja ?? '').isNotEmpty)
+                  Text('Meja    : ${widget.selfOrderNoMeja}',
+                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                if ((widget.selfOrderNamaPelanggan ?? '').isNotEmpty)
+                  Text('Nama    : ${widget.selfOrderNamaPelanggan}',
+                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+              ],
               Text('Tanggal : ${DateTime.now().toString().substring(0, 16)}',
                   style:
                       const TextStyle(fontSize: 12, fontFamily: 'monospace')),
@@ -515,6 +603,12 @@ class _CartScreenState extends State<CartScreen> {
                             style: const TextStyle(
                                 fontSize: 11,
                                 color: Colors.red,
+                                fontFamily: 'monospace')),
+                      if (item.note.isNotEmpty)
+                        Text('  *Catatan: ${item.note}',
+                            style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.deepOrange,
                                 fontFamily: 'monospace')),
                     ],
                   ),
@@ -675,16 +769,38 @@ class _CartScreenState extends State<CartScreen> {
                     'diskon_amount': discountRupee,
                     'tax_persen': item.tax,
                     'tax_amount': taxAmount,
-                    'subtotal': subtotalAfterTax
+                    'subtotal': subtotalAfterTax,
+                    'catatan': item.note,
                   };
                 }).toList()
               };
 
               // Kirim POST Request JSON ke Server CodeIgniter 3 via ApiHelper
-              String? nomorFaktur =
+              // PERBAIKAN: saveOrder sekarang mengembalikan Map lengkap
+              // (bukan cuma String? no_faktur), supaya kita bisa tahu
+              // alasan gagal secara spesifik -- termasuk kalau ternyata
+              // stok produk tidak cukup (dicek atomik di backend).
+              Map<String, dynamic> hasil =
                   await API.saveOrder(orderData, SettingSession.url_api);
 
-              if (nomorFaktur != null) {
+              if (hasil['success'] == true) {
+                String nomorFaktur = hasil['no_faktur'].toString();
+
+                // PERBAIKAN: kalau keranjang ini berasal dari self-order
+                // (bukan input manual kasir), tandai self_order yang
+                // bersangkutan sebagai selesai/approved di backend,
+                // ditautkan ke transaksi asli yang baru saja dibuat.
+                // Tanpa ini, pesanan akan tetap nyangkut di status
+                // 'pending' walau sudah lunas dibayar di sini.
+                if (widget.fromSelfOrderId != null) {
+                  await API.markSelfOrderSettled(
+                    idSelfOrder: widget.fromSelfOrderId.toString(),
+                    noFaktur: nomorFaktur,
+                    idUser: SettingSession.id_user,
+                    urlApi: SettingSession.url_api,
+                  );
+                }
+
                 // Perintah cetak hardware ke Printer Thermal bluetooth BLE
                 if (_isPrinterConnected) {
                   await _printerService.printReceipt(
@@ -706,11 +822,44 @@ class _CartScreenState extends State<CartScreen> {
                     ),
                   );
                 }
+              } else if (hasil['id_product_kurang'] != null &&
+                  (hasil['id_product_kurang'] as List).isNotEmpty) {
+                // Gagal spesifik karena stok tidak cukup untuk sebagian
+                // produk di keranjang. Tunjukkan produk mana ke kasir,
+                // dan sarankan refresh daftar menu supaya stok terbaru
+                // ikut ter-update di layar.
+                final List idKurang = hasil['id_product_kurang'] as List;
+                final namaProdukKurang = posProvider.cart
+                    .where((item) => idKurang.contains(item.id))
+                    .map((item) => item.name)
+                    .join(', ');
+
+                if (mounted) {
+                  showDialog(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: const Text('Stok Tidak Cukup'),
+                      content: Text(
+                        namaProdukKurang.isNotEmpty
+                            ? 'Stok untuk produk berikut tidak mencukupi:\n$namaProdukKurang\n\nSilakan sesuaikan jumlah pesanan atau hapus produk tersebut dari keranjang.'
+                            : (hasil['message'] ??
+                                'Stok tidak cukup untuk sebagian produk.'),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
               } else {
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Gagal sinkronisasi data ke server MySQL!'),
+                    SnackBar(
+                      content: Text(hasil['message'] ??
+                          'Gagal sinkronisasi data ke server MySQL!'),
                       backgroundColor: Colors.redAccent,
                     ),
                   );

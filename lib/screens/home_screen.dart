@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:caffee/services/setting_session.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -7,6 +8,7 @@ import '../providers/pos_provider.dart';
 import '../services/printer_service.dart';
 import '../services/shift_provider.dart';
 import 'cart_screen.dart';
+import 'self_order_verification_screen.dart';
 import '../database/apihelper.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
@@ -41,6 +43,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String image_url = "";
 
+  // --- BARU: NOTIFIKASI SELF-ORDER MASUK ---
+  // Polling setiap 5 detik ke tabel self_order (lewat endpoint pending)
+  // supaya kasir dapat notifikasi walau belum buka layar Verifikasi Order.
+  Timer? _selfOrderPollTimer;
+  int _pendingSelfOrderCount = 0;
+  Set<String> _knownSelfOrderIds = {};
+  bool _selfOrderBaselineSet = false; // supaya tidak notif untuk pesanan lama saat app baru dibuka
+
   @override
   void initState() {
     super.initState();
@@ -49,12 +59,73 @@ class _HomeScreenState extends State<HomeScreen> {
     daily_id_now = dailyFormat.format(now);
     _checkShiftStatusBeforeLoad();
     _cekStatusPrinterKini();
+    _startSelfOrderPolling();
+  }
+
+  void _startSelfOrderPolling() {
+    _checkNewSelfOrders(); // cek pertama kali langsung (jadi baseline)
+    _selfOrderPollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _checkNewSelfOrders();
+    });
+  }
+
+  Future<void> _checkNewSelfOrders() async {
+    final hasil = await API.getPendingSelfOrders(
+        SettingSession.id_cabang, SettingSession.url_api);
+    if (!mounted) return;
+    if (hasil['success'] != true) return; // diam-diam abaikan kalau gagal fetch, jangan ganggu kasir
+
+    final List<dynamic> orders = hasil['data'] ?? [];
+    final currentIds = orders.map((o) => o['id_self_order'].toString()).toSet();
+
+    if (!_selfOrderBaselineSet) {
+      // Pertama kali cek sejak app dibuka -- simpan saja sebagai baseline,
+      // JANGAN munculkan notifikasi untuk pesanan yang sudah ada duluan.
+      _knownSelfOrderIds = currentIds;
+      _selfOrderBaselineSet = true;
+      setState(() => _pendingSelfOrderCount = orders.length);
+      return;
+    }
+
+    final idBaru = currentIds.difference(_knownSelfOrderIds);
+
+    setState(() {
+      _pendingSelfOrderCount = orders.length;
+      _knownSelfOrderIds = currentIds;
+    });
+
+    if (idBaru.isNotEmpty && mounted) {
+      // Ambil detail meja dari pesanan yang baru masuk untuk pesan notifikasi
+      final pesananBaru = orders.where((o) => idBaru.contains(o['id_self_order'].toString())).toList();
+      final daftarMeja = pesananBaru.map((o) => 'Meja ${o['no_meja']}').join(', ');
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(idBaru.length == 1
+              ? 'Pesanan self-order baru masuk! $daftarMeja'
+              : '${idBaru.length} pesanan self-order baru masuk! $daftarMeja'),
+          backgroundColor: const Color(0xFF2E7D32),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'LIHAT',
+            textColor: Colors.white,
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SelfOrderVerificationScreen()),
+              );
+            },
+          ),
+        ),
+      );
+    }
   }
 
   @override
   void dispose() {
     _usernameController.dispose();
     _passwordController.dispose();
+    _selfOrderPollTimer?.cancel();
     super.dispose();
   }
 
@@ -162,6 +233,21 @@ class _HomeScreenState extends State<HomeScreen> {
     return DateFormat('yyMMdd').format(kini);
   }
 
+  // BARU: ubah daily_id (format yymmdd, misal "260907") jadi tampilan
+  // tanggal yang enak dibaca (misal "07 Sep 2026").
+  String _formatTanggalShift(String dailyId) {
+    if (dailyId.length != 6) return dailyId;
+    try {
+      int yy = int.parse(dailyId.substring(0, 2));
+      int mm = int.parse(dailyId.substring(2, 4));
+      int dd = int.parse(dailyId.substring(4, 6));
+      DateTime dt = DateTime(2000 + yy, mm, dd);
+      return DateFormat('dd MMM yyyy').format(dt);
+    } catch (_) {
+      return dailyId;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final posProvider = Provider.of<PosProvider>(context);
@@ -267,8 +353,22 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
-        title: Text('KASIR\n${SettingSession.nama_lengkap}',
-            style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('KASIR',
+                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 14)),
+            Text(SettingSession.nama_lengkap,
+                style: const TextStyle(color: Colors.white, fontSize: 12)),
+            // BARU: info nomor shift & tanggal shift yang sedang aktif
+            if (shiftProvider.isShiftOpen)
+              Text(
+                'Shift #${shiftProvider.activeShiftId} • ${_formatTanggalShift(SettingSession.daily_id)}',
+                style: const TextStyle(color: Colors.white70, fontSize: 10),
+              ),
+          ],
+        ),
         backgroundColor: const Color(0xFF4E342E),
         iconTheme: const IconThemeData(color: Colors.white),
         elevation: 0,
@@ -291,6 +391,44 @@ class _HomeScreenState extends State<HomeScreen> {
           //     // =========================================================================
           //   },
           // ),
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.storefront, color: Colors.amberAccent),
+                tooltip: 'Verifikasi Order',
+                onPressed: () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const SelfOrderVerificationScreen()),
+                  );
+                  // Setelah kembali dari layar verifikasi, langsung cek ulang
+                  // supaya badge angka ikut ter-update (misal berkurang
+                  // karena sudah diproses di sana).
+                  _checkNewSelfOrders();
+                },
+              ),
+              if (_pendingSelfOrderCount > 0)
+                Positioned(
+                  right: 6,
+                  top: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    child: Text(
+                      _pendingSelfOrderCount > 99 ? '99+' : '$_pendingSelfOrderCount',
+                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: () {

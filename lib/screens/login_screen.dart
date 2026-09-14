@@ -30,7 +30,7 @@ class _LoginScreenState extends State<LoginScreen> {
   String daily_id = "";
 
   final TextEditingController _strController = TextEditingController(
-      text: 'http://192.168.0.7:8080/poscaffee/index.php/api/');
+      text: 'http://172.16.4.122:8080/poscaffee/index.php/api/');
   String _str = "";
 
   @override
@@ -38,8 +38,8 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     _projectVersion = "1.0.0";
     strversion_date = "last update 03 Agustus 2026";
-    // _url_api = "http://192.168.0.7:8080/poscaffee/index.php/api/";
-    _url_api = "https://api.portosales.com/index.php/api/";
+    _url_api = "http://172.16.4.122:8080/poscaffee/index.php/api/";
+    // _url_api = "https://api.portosales.com/index.php/api/";
   }
 
   void _handleLogin() {

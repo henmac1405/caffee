@@ -342,7 +342,15 @@ class ApiHelper {
     return data ?? [];
   }
 
-  Future<String?> saveOrder(
+  // PERBAIKAN: sebelumnya fungsi ini cuma mengembalikan String? no_faktur
+  // (atau null kalau gagal), sehingga alasan kegagalan (misal stok tidak
+  // cukup) tidak bisa ditampilkan ke kasir. Sekarang mengembalikan Map
+  // lengkap berisi:
+  //   'success'            -> bool
+  //   'no_faktur'          -> String? (ada kalau sukses)
+  //   'message'            -> String (pesan dari server, siap ditampilkan)
+  //   'id_product_kurang'  -> List? (ada kalau gagal karena stok kurang)
+  Future<Map<String, dynamic>> saveOrder(
       Map<String, dynamic> orderData, String urlApi) async {
     String username = 'admin';
     String password = '1234';
@@ -362,21 +370,43 @@ class ApiHelper {
         body: json.encode(orderData),
       );
 
-      // CETAK LOG UNTUK MELIHAT PESAN ERROR ASLI DARI PHP
       print('Status Code: ${response.statusCode}');
       print('Response Body PHP: ${response.body}');
 
+      Map<String, dynamic> jsonResult = {};
+      try {
+        jsonResult = jsonDecode(response.body);
+      } catch (_) {
+        // Body bukan JSON valid (misal error server mentah)
+      }
+
       if (response.statusCode == 200) {
-        var jsonResult = jsonDecode(response.body);
-        return jsonResult['no_faktur'];
+        return {
+          'success': true,
+          'no_faktur': jsonResult['no_faktur'],
+          'message': jsonResult['message'] ?? 'Transaksi berhasil disimpan',
+        };
+      } else if (response.statusCode == 409) {
+        // Stok tidak cukup untuk sebagian produk (lihat backend Mdl_transaction)
+        return {
+          'success': false,
+          'message': jsonResult['message'] ?? 'Stok tidak cukup',
+          'id_product_kurang': jsonResult['id_product_kurang'] ?? [],
+        };
       } else {
-        // Menampilkan pesan error dari PHP langsung ke debug console
-        print("Gagal karena server merespon: ${response.body}");
+        return {
+          'success': false,
+          'message': jsonResult['message'] ??
+              'Gagal menyimpan transaksi (kode ${response.statusCode})',
+        };
       }
     } catch (e) {
       print("Error saving transaction: $e");
+      return {
+        'success': false,
+        'message': 'Gagal terhubung ke server: $e',
+      };
     }
-    return null;
   }
 
   Future<Map<String, dynamic>?> checkActiveShift(
@@ -580,6 +610,13 @@ class ApiHelper {
     try {
       final response = await http.post(
         Uri.parse('${urlApi}transaction/reprint_log'),
+        // PERBAIKAN: header X-API-KEY sebelumnya tidak dikirim sama
+        // sekali di sini, padahal backend sekarang mewajibkannya di
+        // SEMUA method controller Transaction (lihat API_Controller.php).
+        // Tanpa ini, request akan ditolak 401 Unauthorized.
+        headers: {
+          "X-API-KEY": "rahasia123",
+        },
         body: {
           'no_faktur': noFaktur,
           'id_user': idUser,
@@ -614,6 +651,12 @@ class ApiHelper {
     try {
       final response = await http.post(
         Uri.parse('${urlApi}transaction/void'),
+        // PERBAIKAN: header X-API-KEY sebelumnya tidak dikirim sama
+        // sekali di sini. Backend sekarang mewajibkannya di SEMUA
+        // method controller Transaction, termasuk void_post.
+        headers: {
+          "X-API-KEY": "rahasia123",
+        },
         body: {
           'id_transaksi': idTransaksi,
           'id_admin': idAdmin,
@@ -759,6 +802,164 @@ class ApiHelper {
     }
 
     return data ?? [];
+  }
+
+  // =========================================================================
+  // FUNGSI BARU: MODULE VERIFIKASI SELF-ORDER OLEH PELAYAN/KASIR
+  // =========================================================================
+
+  /// Ambil daftar pesanan self-order yang masih menunggu verifikasi
+  /// untuk cabang aktif.
+  ///
+  /// PERBAIKAN: sebelumnya kalau terjadi error (jaringan, X-API-KEY salah,
+  /// endpoint salah, dsb) fungsi ini diam-diam mengembalikan list kosong
+  /// -- sehingga di layar terlihat sama persis seperti "memang tidak ada
+  /// pesanan", padahal sebenarnya gagal fetch. Sekarang mengembalikan Map
+  /// berisi 'success' dan 'message' supaya error asli kelihatan.
+  Future<Map<String, dynamic>> getPendingSelfOrders(String idCabang, String urlApi) async {
+    try {
+      final response = await http.get(
+        Uri.parse('${urlApi}selforder/pending?id_cabang=$idCabang'),
+        headers: {"X-API-KEY": "rahasia123"},
+      );
+      if (response.statusCode == 200) {
+        final json = jsonDecode(response.body);
+        return {'success': true, 'data': json['data'] ?? []};
+      } else {
+        return {
+          'success': false,
+          'message': 'Server balas kode ${response.statusCode}: ${response.body}',
+        };
+      }
+    } catch (e) {
+      return {'success': false, 'message': 'Gagal terhubung ke server: $e'};
+    }
+  }
+
+  /// Setujui pesanan self-order -> baru di sini transaksi asli dibuat
+  /// dan stok dipotong (lewat backend yang memanggil ulang
+  /// Mdl_transaction::save_transaction, sama seperti transaksi kasir biasa).
+  ///
+  /// Return Map berisi 'success', 'message', 'no_faktur' (kalau sukses),
+  /// atau 'id_product_kurang' (kalau gagal karena stok tidak cukup).
+  Future<Map<String, dynamic>> approveSelfOrder({
+    required String idSelfOrder,
+    required String idUser,
+    required int idShift,
+    required String metodePembayaran,
+    required double uangTunai,
+    required double uangKembalian,
+    required String dailyId,
+    required String urlApi,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${urlApi}selforder/approve'),
+        headers: {"X-API-KEY": "rahasia123"},
+        body: {
+          'id_self_order': idSelfOrder,
+          'id_user': idUser,
+          'id_shift': idShift.toString(),
+          'metode_pembayaran': metodePembayaran,
+          'uang_tunai': uangTunai.toString(),
+          'uang_kembalian': uangKembalian.toString(),
+          'daily_id': dailyId,
+        },
+      );
+
+      Map<String, dynamic> json = {};
+      bool jsonValid = true;
+      try {
+        json = jsonDecode(response.body);
+      } catch (_) {
+        jsonValid = false;
+      }
+
+      if (response.statusCode == 200 && jsonValid) {
+        return {
+          'success': true,
+          'no_faktur': json['no_faktur'],
+          'message': json['message'] ?? 'Pesanan berhasil diterima',
+        };
+      } else if (!jsonValid) {
+        // PERBAIKAN: server tidak balas JSON valid (kemungkinan error
+        // PHP mentah/HTML). Tampilkan potongan respons asli supaya
+        // ketahuan errornya, bukan cuma pesan generik yang tidak
+        // membantu debug.
+        final cuplikan = response.body.length > 300
+            ? response.body.substring(0, 300)
+            : response.body;
+        return {
+          'success': false,
+          'message': 'Server error (kode ${response.statusCode}): $cuplikan',
+        };
+      } else {
+        return {
+          'success': false,
+          'message': json['message'] ?? 'Gagal memproses pesanan',
+          'id_product_kurang': json['id_product_kurang'],
+        };
+      }
+    } catch (e) {
+      return {'success': false, 'message': 'Gagal terhubung ke server: $e'};
+    }
+  }
+
+  /// Tolak pesanan self-order. Tidak menyentuh stok/transaksi.
+  Future<Map<String, dynamic>> rejectSelfOrder({
+    required String idSelfOrder,
+    required String idUser,
+    required String alasan,
+    required String urlApi,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${urlApi}selforder/reject'),
+        headers: {"X-API-KEY": "rahasia123"},
+        body: {
+          'id_self_order': idSelfOrder,
+          'id_user': idUser,
+          'alasan': alasan,
+        },
+      );
+      final json = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200 && json['status'] == true,
+        'message': json['message'] ?? '',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Gagal terhubung ke server: $e'};
+    }
+  }
+
+  /// Tandai self_order sebagai selesai/approved SETELAH pembayaran
+  /// benar-benar sukses lewat cart_screen (alur normal kasir), ditautkan
+  /// ke transaksi asli yang baru dibuat. Dipanggil dari cart_screen,
+  /// bukan dari layar Verifikasi Self-Order lagi.
+  Future<Map<String, dynamic>> markSelfOrderSettled({
+    required String idSelfOrder,
+    required String noFaktur,
+    required String idUser,
+    required String urlApi,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('${urlApi}selforder/mark_settled'),
+        headers: {"X-API-KEY": "rahasia123"},
+        body: {
+          'id_self_order': idSelfOrder,
+          'no_faktur': noFaktur,
+          'id_user': idUser,
+        },
+      );
+      final json = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200 && json['status'] == true,
+        'message': json['message'] ?? '',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Gagal terhubung ke server: $e'};
+    }
   }
 
   _toastInfo(String info) {

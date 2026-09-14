@@ -7,6 +7,7 @@ class MenuItem {
   final String category;
   final String imagePath;
   int quantity;
+  String note; // PERBAIKAN: catatan per item, contoh "tidak pedas", "tanpa gula"
 
   MenuItem({
     required this.id,
@@ -17,6 +18,7 @@ class MenuItem {
     required this.category,
     required this.imagePath,
     this.quantity = 1,
+    this.note = '',
   });
 
   factory MenuItem.fromJson(Map<String, dynamic> json) {
